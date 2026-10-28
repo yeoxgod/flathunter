@@ -95,7 +95,7 @@ def main() -> None:
 
         if not has_token():
             print("Для обновлений нужен GitHub-токен (один раз). Сейчас откроется GitHub:")
-            print("  Token name: flat-hunter; Repository access: Only select repositories -> flat-hunter;")
+            print("  Token name: flat-hunter; Repository access: Only select repositories -> flathunter;")
             print("  Permissions -> Contents: Read-only. Нажми Generate token и скопируй его.")
             import webbrowser
 

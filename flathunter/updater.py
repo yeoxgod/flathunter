@@ -11,7 +11,7 @@ from pathlib import Path
 
 import httpx
 
-REPO = "yeoxgod/flat-hunter"
+REPO = "yeoxgod/flathunter"
 BRANCH = "main"
 ROOT = Path(__file__).resolve().parent.parent
 STATE = ROOT / "data" / "installed_version.json"
