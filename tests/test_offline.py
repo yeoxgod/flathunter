@@ -635,3 +635,75 @@ class LinksAndUpdaterTests(unittest.TestCase):
                 self.assertEqual((root / "start.bat").read_bytes(), b"@echo off\r\necho hi\r\n")
                 self.assertFalse((root / "data/secrets.json").exists())
                 self.assertEqual(up.installed()["sha"], "abc")
+
+
+class TgBotSourceTests(unittest.IsolatedAsyncioTestCase):
+    def test_text_formats(self):
+        from flathunter.sources.textparse import listings_from_text
+        msg = ("🏠 Mieszkanie 2 pokoje, Mokotów\n💰 4 300 zł + 650 zł czynsz\n📐 46 m²\n🚪 2 pokoje\n"
+               "👤 Prywatnie\nhttps://www.otodom.pl/pl/oferta/mieszkanie-ID4abc1?utm=tg")
+        (l,) = listings_from_text(msg)
+        self.assertEqual((l.source, l.ext_id, l.price, l.admin_rent, l.area, l.rooms, l.location),
+                         ("otodom", "4abc1", 4300, 650, 46.0, 2, "Mokotów"))
+        self.assertEqual(l.url, "https://www.otodom.pl/pl/oferta/mieszkanie-ID4abc1")
+        self.assertEqual(l.params["seller"], "частное лицо")
+        ru = "Квартира 3-комн., 58 м2, район: Wola\nЦена 5200 PLN\nОткрыть"
+        (l2,) = listings_from_text(ru, ["https://www.olx.pl/d/oferta/mieszkanie-CID3-IDzz9.html?reason=x"])
+        self.assertEqual((l2.source, l2.ext_id, l2.price, l2.area, l2.rooms, l2.location), ("olx", "zz9", 5200, 58.0, 3, "Wola"))
+        self.assertEqual(listings_from_text("Добро пожаловать! /help"), [])
+
+    def test_message_urls(self):
+        from types import SimpleNamespace
+        from telethon.tl.types import MessageEntityTextUrl
+        from flathunter.tguser import listings_from_message
+        text = "Kawalerka Wola 2900 zł 28 m² link"
+        msg = SimpleNamespace(
+            raw_text=text, message=text, date=datetime(2026, 10, 28, 9, 0, tzinfo=__import__("datetime").timezone.utc),
+            entities=[MessageEntityTextUrl(offset=text.index("link"), length=4, url="https://www.olx.pl/d/oferta/k-CID3-IDq1.html")],
+            buttons=[[SimpleNamespace(url="https://www.otodom.pl/pl/oferta/k-ID4q2")]],
+        )
+        items = listings_from_message(msg)
+        self.assertEqual([(i.source, i.ext_id) for i in items], [("olx", "q1"), ("otodom", "4q2")])
+        self.assertEqual((items[0].rooms, items[0].price), (1, 2900))
+        self.assertTrue(items[0].posted.startswith("2026-10-28"))
+
+    async def test_ingest_and_backfill_extra(self):
+        from flathunter.sources.textparse import listings_from_text
+
+        class Blocked:
+            async def get(self, url):
+                raise FetchError("HTTP 403", blocked=True)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db = DB(f"{tmp}/t.db")
+            st = Settings(db)
+            st.update("search.max_price", 6000)
+            for n in ("otodom", "olx"):
+                st.update(f"sources.{n}.enabled", False)
+            got = []
+
+            async def notify(row_id, listing, analysis, allow_auto=True):
+                got.append((listing["ext_id"], allow_auto, listing["params"].get("_note", "")))
+
+            async def alert(t):
+                pass
+
+            p = Pipeline(db, st.get, Blocked(), FakeAnalyzer(), notify, alert)
+            a = listings_from_text("2 pokoje 4000 zł 45 m² https://www.olx.pl/d/oferta/a-CID3-IDa1.html")
+            b = listings_from_text("3 pokoje 9000 zł https://www.olx.pl/d/oferta/b-CID3-IDb1.html")
+            stats = await p.ingest(a + b)
+            self.assertEqual((stats["sent"], stats["filtered"]), (1, 1))
+            self.assertEqual(got[0][:2], ("a1", True))
+            self.assertIn("недоступна", got[0][2])          # 403 -> оценка по сообщению
+            self.assertEqual((await p.ingest(a))["already"], 1)
+
+            now = datetime.now().isoformat(timespec="minutes")
+            c = listings_from_text("2 pokoje 4500 zł https://www.otodom.pl/pl/oferta/c-ID4c1", posted=now)
+
+            async def extra(hours):
+                return a + c
+
+            p.extra_backfill = extra
+            res = await p.backfill(hours=48)
+            self.assertEqual((res.get("sent"), res.get("already")), (1, 1))
+            self.assertEqual(got[-1][:2], ("4c1", False))   # из backfill без автоотправки

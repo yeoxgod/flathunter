@@ -122,6 +122,7 @@ def settings_view(s: dict) -> tuple[str, InlineKeyboardMarkup]:
         [B(f"{on_off(src['otodom']['enabled'])} Otodom", callback_data="s:src:otodom"),
          B(f"{on_off(src['olx']['enabled'])} OLX", callback_data="s:src:olx"),
          B(f"{on_off(src['channel']['enabled'])} канал TG", callback_data="s:src:channel")],
+        [B(f"{on_off(src['tgbot']['enabled'])} чат @{src['tgbot']['chat']} (нужен перезапуск)", callback_data="s:src:tgbot")],
     ]
     return text, InlineKeyboardMarkup(kb)
 
@@ -187,6 +188,7 @@ class FlatBot:
         self.pipeline = Pipeline(self.db, self.settings.get, self.fetcher, self.analyzer, self.notify, self.alert)
         self.sends = SendManager(self.sender, self.db, self.settings.get, self.on_send_result)
         self.restart_requested = False
+        self.watcher = None
         self._register()
 
     # --- жизненный цикл --------------------------------------------------------
@@ -208,9 +210,45 @@ class FlatBot:
             ("status", "статистика"), ("poll", "проверить сейчас"), ("update", "обновить бота"), ("help", "помощь"),
         ])
         await self.alert("🟢 Бот запущен. /help — что умею.")
+        await self._start_tg_watcher()
         self.app.job_queue.run_repeating(self._update_check_job, interval=6 * 3600, first=60, name="update_check")
 
+    async def _start_tg_watcher(self) -> None:
+        s = self.settings.get()
+        tg = s["sources"]["tgbot"]
+        self.watcher = None
+        if not tg.get("enabled"):
+            return
+        if not (self.secrets.get("tg_api_id") and (self.data_dir / "tg_user.session").exists()):
+            await self.alert(f"ℹ️ Чтобы я читал объявления из @{tg['chat']}, запусти на компьютере tg-login.bat (один раз).")
+            return
+        from .tguser import TgUserWatcher
+
+        w = TgUserWatcher(self.data_dir, self.secrets["tg_api_id"], self.secrets["tg_api_hash"], tg["chat"], self._on_tg_listings)
+        try:
+            ok = await w.start()
+        except Exception as e:
+            log.exception("tg watcher")
+            await self.alert(f"⚠️ Не получилось подключиться к чату @{tg['chat']}: {e}")
+            return
+        if not ok:
+            await self.alert("⚠️ Вход в Telegram-аккаунт слетел: запусти tg-login.bat ещё раз.")
+            return
+        self.watcher = w
+        self.pipeline.extra_backfill = w.recent
+        await self.alert(f"📥 Читаю объявления из @{tg['chat']} и разбираю каждое новое.")
+
+    async def _on_tg_listings(self, items: list) -> None:
+        if self.db.kv_get("paused") == "1":
+            return
+        try:
+            await self.pipeline.ingest(items)
+        except Exception:
+            log.exception("ingest")
+
     async def _post_shutdown(self, app: Application) -> None:
+        if getattr(self, "watcher", None):
+            await self.watcher.stop()
         await self.sends.stop()
         await self.sender.close()
         await self.fetcher.aclose()
@@ -401,9 +439,12 @@ class FlatBot:
             ("Критерии поиска", bool(s["search"].get("summary_ru") or s["search"].get("max_price")), "/criteria"),
             ("Данные о себе", bool(s["profile"].get("name") or s["profile"].get("about")), "/me"),
         ]
+        tg = s["sources"]["tgbot"]
+        src_line = (f"\n📥 Источник: чат @{tg['chat']} — {'подключён' if getattr(self, 'watcher', None) else 'не подключён, запусти tg-login.bat'}"
+                    if tg.get("enabled") else "")
         lines = [f"{'✅' if done else '⬜️'} {name} — {cmd}" for name, done, cmd in steps]
         await update.message.reply_text(
-            "Привет! Я ищу квартиры, оцениваю и пишу владельцам.\n\n<b>Настройка</b>\n" + "\n".join(lines)
+            "Привет! Я ищу квартиры, оцениваю и пишу владельцам.\n\n<b>Настройка</b>\n" + "\n".join(lines) + src_line
             + "\n\nСейчас включён <b>тест-режим</b>: при отправке я вставляю текст, но не жму «Отправить», "
             "и присылаю скрин. Когда убедишься, что всё работает, выключи его в /settings.",
             parse_mode=ParseMode.HTML,
@@ -560,7 +601,7 @@ class FlatBot:
                 lines.append(f"{name.upper()}: {'нашёл ' + str(n) + ' объявлений на первой странице' if n else '⚠️ ничего не нашлось'}")
             except Exception as e:
                 lines.append(f"{name.upper()}: ⚠️ не загрузилось ({str(e)[:100]})")
-        if lines:
+        if lines and not getattr(self, "watcher", None):
             await chat.send_message("🔎 Поиск настроен по критериям:\n" + "\n".join(lines)
                                     + "\nСсылки можно посмотреть или заменить своими: /links")
 
@@ -688,7 +729,8 @@ class FlatBot:
 
     async def _run_backfill(self, chat, hours: int) -> None:
         s = self.settings.get()
-        if not (s["sources"]["otodom"]["search_url"] or s["sources"]["olx"]["search_url"] or s["sources"]["channel"]["enabled"]):
+        if not (getattr(self, "watcher", None) or s["sources"]["otodom"]["search_url"] or s["sources"]["olx"]["search_url"]
+                or s["sources"]["channel"]["enabled"]):
             await chat.send_message("Сначала пришли ссылки на выдачу: /links")
             return
         status = await chat.send_message(f"Собираю объявления за последние {hours} ч… Это займёт несколько минут.")

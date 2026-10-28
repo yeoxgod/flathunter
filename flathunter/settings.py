@@ -18,6 +18,7 @@ DEFAULTS = {
         "otodom": {"enabled": True, "search_url": "", "auto": True},
         "olx": {"enabled": True, "search_url": "", "auto": True},
         "channel": {"enabled": False, "name": "home_Warszawa"},
+        "tgbot": {"enabled": True, "chat": "thewarsawrentbot"},
     },
     "poll_interval_minutes": 7,
     "max_new_per_cycle": 8,

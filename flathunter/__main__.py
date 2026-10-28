@@ -72,7 +72,7 @@ async def _login() -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser(prog="flathunter")
-    ap.add_argument("cmd", choices=["setup", "ai", "run", "login", "check", "update"])
+    ap.add_argument("cmd", choices=["setup", "ai", "run", "login", "check", "update", "tglogin"])
     args = ap.parse_args()
     from .net import drop_dead_proxies
 
@@ -89,6 +89,44 @@ def main() -> None:
         DATA_DIR.mkdir(exist_ok=True)
         setup_claude(load_secrets())
         print("Готово. Перезапусти бота (закрой окно бота и открой start.bat).")
+        return
+    if args.cmd == "tglogin":
+        import webbrowser
+
+        from .db import DB
+        from .settings import DATA_DIR, Settings, load_secrets, save_secrets
+        from .tguser import interactive_login
+
+        DATA_DIR.mkdir(exist_ok=True)
+        sec = load_secrets()
+        st = Settings(DB(DATA_DIR / "flathunter.db"))
+        chat = st.get()["sources"]["tgbot"]["chat"]
+        print(f"Подключаю чтение объявлений из твоего чата с @{chat}.")
+        print("Бот будет только читать этот один чат от твоего аккаунта: ничего не пишет и не удаляет.")
+        if not (sec.get("tg_api_id") and sec.get("tg_api_hash")):
+            print()
+            print("1) Сейчас откроется my.telegram.org. Войди по номеру телефона (код придёт в Telegram).")
+            print("2) Открой «API development tools», заполни App title: flathunter, Short name: flathunter,")
+            print("   Platform: Desktop, остальное пусто, нажми Create application.")
+            print("3) Скопируй сюда App api_id и App api_hash.")
+            webbrowser.open("https://my.telegram.org/apps")
+            sec["tg_api_id"] = int(input("api_id: ").strip())
+            sec["tg_api_hash"] = input("api_hash: ").strip()
+            save_secrets(sec)
+        print()
+        print("Теперь вход в твой аккаунт (как в новом устройстве).")
+        try:
+            print(interactive_login(DATA_DIR, sec["tg_api_id"], sec["tg_api_hash"], chat))
+        except Exception as e:
+            print(f"Не получилось: {e}")
+            sys.exit(1)
+        s = st.get()
+        s["sources"]["tgbot"]["enabled"] = True
+        # сайты отвечают 403 на прямые запросы, поэтому их опрос выключаем: объявления идут из чата
+        s["sources"]["otodom"]["enabled"] = False
+        s["sources"]["olx"]["enabled"] = False
+        st.save(s)
+        print("Готово. Перезапусти бота: закрой его окно и открой start.bat.")
         return
     if args.cmd == "update":
         from .updater import TOKEN_URL, UpdateError, apply, available, has_token, save_token

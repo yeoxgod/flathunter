@@ -12,6 +12,8 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 from .filters import prefilter
 from .models import Listing
 from .sources import build_sources, olx, otodom
+
+DETAIL = {"olx": olx.parse_detail, "otodom": otodom.parse_detail}
 from .sources.base import FetchError
 from .util import parse_posted
 
@@ -43,6 +45,11 @@ def listing_from_url(url: str) -> tuple[Listing, object] | None:
     return None
 
 
+class _Src:
+    def __init__(self, parse_detail):
+        self.parse_detail = parse_detail
+
+
 class Pipeline:
     """Один проход: источники -> новые -> предфильтр -> страница -> модель -> карточка."""
 
@@ -54,6 +61,7 @@ class Pipeline:
         self.notify = notify  # async (row_id, listing_dict, analysis) -> None
         self.alert = alert    # async (text) -> None
         self.lock = asyncio.Lock()
+        self.extra_backfill = None  # async (hours) -> list[Listing], например чат с ботом-агрегатором
 
     def _bump(self, key: str) -> int:
         n = int(self.db.kv_get(key, "0")) + 1
@@ -243,6 +251,20 @@ class Pipeline:
                         break
                 self.db.kv_set(seed_key(src), "1")
 
+            if self.extra_backfill is not None:
+                await say("Читаю сообщения бота-агрегатора…")
+                try:
+                    for l in await self.extra_backfill(hours):
+                        if l.key in keys:
+                            continue
+                        keys.add(l.key)
+                        seen_all.append(l)
+                        dt = parse_posted(l.posted)
+                        candidates.append((dt or now, _Src(DETAIL[l.source]), l))
+                except Exception as e:
+                    log.warning("backfill из чата: %s", e)
+                    stats["errors"] += 1
+
             candidates.sort(key=lambda x: x[0], reverse=True)
             stats["found"] = len(candidates)
             await say(f"За {hours} ч нашёл {len(candidates)} объявлений, фильтрую и оцениваю…")
@@ -268,4 +290,16 @@ class Pipeline:
             for l in seen_all:
                 if not self.db.has(l.key):
                     self.db.insert(l, "seed")
+            return dict(stats)
+
+    async def ingest(self, listings: list) -> dict:
+        """Объявления, пришедшие извне (сообщения бота-агрегатора): фильтры -> оценка -> карточка."""
+        async with self.lock:
+            s = self.get_settings()
+            stats: Counter = Counter()
+            for l in listings:
+                if self.db.has(l.key):
+                    stats["already"] += 1
+                    continue
+                await self.process(DETAIL[l.source], l, stats, s)
             return dict(stats)
