@@ -62,6 +62,7 @@ class Pipeline:
         self.alert = alert    # async (text) -> None
         self.lock = asyncio.Lock()
         self.extra_backfill = None  # async (hours) -> list[Listing], например чат с ботом-агрегатором
+        self.on_source_blocked = None  # async (name) -> None: сайт блокирует прямые запросы
 
     def _bump(self, key: str) -> int:
         n = int(self.db.kv_get(key, "0")) + 1
@@ -96,7 +97,10 @@ class Pipeline:
             n = self._bump(fail_key)
             log.warning("%s: ошибка загрузки (%s подряд): %s", src.name, n, e)
             if n == 3:
-                await self.alert(f"⚠️ {src.name}: 3 неудачи подряд ({e}). Продолжаю пробовать.")
+                if isinstance(e, FetchError) and e.blocked and self.on_source_blocked is not None:
+                    await self.on_source_blocked(src.name)
+                else:
+                    await self.alert(f"⚠️ {src.name}: 3 неудачи подряд ({e}). Продолжаю пробовать.")
             stats["errors"] += 1
             return
         self._reset(fail_key)

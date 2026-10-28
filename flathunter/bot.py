@@ -16,6 +16,7 @@ from telegram.error import BadRequest
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
+    ChatMemberHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
@@ -27,6 +28,7 @@ from .db import DB
 from .links import apply_auto_links
 from .llm import build_llm
 from .pipeline import Pipeline, listing_from_url
+from .sources.textparse import listings_from_text
 from .render import render_card, wa_link
 from .sender import CHANNEL_NAMES, BrowserSender, SendJob, SendManager, SendResult, choose_channel
 from .settings import Settings, load_secrets
@@ -53,6 +55,10 @@ HELP = (
     "/backfill — прислать подходящие за последние 2 суток (/backfill 24 — за сутки)\n"
     "/status — статистика, /poll — проверить сейчас, /pause и /resume\n"
     "/update — обновить бота до последней версии\n\n"
+    "<b>Как получать объявления</b>\n"
+    "• Перешли мне сообщения от @thewarsawrentbot (можно пачкой): разберу, отсею неподходящие, пришлю карточки.\n"
+    "• Полный автомат: создай закрытый канал, добавь туда меня админом и настрой @thewarsawrentbot "
+    "присылать объявления в этот канал (если он так умеет). Я спрошу подтверждение и буду читать канал сам.\n"
     "Можно прислать ссылку на любое объявление OLX/Otodom: разберу его сразу.\n"
     "Ответь (reply) на карточку текстом, например «добавь, что заедем с 1 декабря», и я перепишу черновик."
 )
@@ -189,6 +195,8 @@ class FlatBot:
         self.sends = SendManager(self.sender, self.db, self.settings.get, self.on_send_result)
         self.restart_requested = False
         self.watcher = None
+        self._fwd_buffer: list = []
+        self.pipeline.on_source_blocked = self._source_blocked
         self._register()
 
     # --- жизненный цикл --------------------------------------------------------
@@ -238,6 +246,114 @@ class FlatBot:
         self.pipeline.extra_backfill = w.recent
         await self.alert(f"📥 Читаю объявления из @{tg['chat']} и разбираю каждое новое.")
 
+    # --- объявления из пересланных сообщений и каналов ----------------------------
+    @staticmethod
+    def message_listings(msg) -> list:
+        text = msg.text or msg.caption or ""
+        urls = []
+        try:
+            ents = msg.parse_entities() if msg.text else msg.parse_caption_entities()
+            for ent, t in ents.items():
+                if ent.type == "text_link" and ent.url:
+                    urls.append(ent.url)
+                elif ent.type == "url":
+                    urls.append(t)
+        except Exception:
+            pass
+        kb = getattr(msg.reply_markup, "inline_keyboard", None) or []
+        for row in kb:
+            for b in row:
+                if getattr(b, "url", None):
+                    urls.append(b.url)
+        origin = getattr(msg, "forward_origin", None)
+        dt = getattr(origin, "date", None) or msg.date
+        posted = dt.astimezone().replace(tzinfo=None).isoformat(timespec="minutes") if dt else ""
+        return listings_from_text(text, urls, posted)
+
+    async def on_forward(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self.ok(update) or not update.message:
+            return
+        items = self.message_listings(update.message)
+        if not items:
+            if update.message.text:
+                await self.on_text(update, context)
+            return
+        self._fwd_buffer.extend(items)
+        # пачку пересланных сообщений собираем 4 секунды и разбираем разом
+        for j in self.app.job_queue.get_jobs_by_name("fwd"):
+            j.schedule_removal()
+        self.app.job_queue.run_once(self._flush_forwards, when=4, name="fwd")
+
+    async def _flush_forwards(self, context: ContextTypes.DEFAULT_TYPE) -> None:
+        items, self._fwd_buffer = self._fwd_buffer, []
+        if not items:
+            return
+        msg = await self.app.bot.send_message(self.chat_id, f"Разбираю пересланное: {len(items)} объявл.…")
+        try:
+            st = await self.pipeline.ingest(items)
+        except Exception as e:
+            log.exception("forward ingest")
+            await msg.edit_text(f"Не получилось: {e}")
+            return
+        parts = [f"карточек {st.get('sent', 0)}"]
+        for k, name in (("filtered", "не прошли фильтры"), ("lowscore", "низкая оценка"), ("already", "уже было"),
+                        ("errors", "ошибок")):
+            if st.get(k):
+                parts.append(f"{name} {st[k]}")
+        await msg.edit_text(f"Из {len(items)}: " + ", ".join(parts) + ".")
+
+    async def on_my_member(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        cm = update.my_chat_member
+        if cm is None or cm.chat.type == "private":
+            return
+        status = cm.new_chat_member.status
+        if status not in ("administrator", "member"):
+            return
+        if cm.chat.type != "channel":
+            await self.alert(f"ℹ️ Меня добавили в группу «{cm.chat.title}». В группах боты не видят сообщения других "
+                             "ботов, поэтому объявления от бота-агрегатора лучше пересылать в канал.")
+            return
+        if cm.chat.id in self.settings.get()["sources"]["channels"]:
+            return
+        await self.app.bot.send_message(
+            self.chat_id, f"Меня добавили в канал «{cm.chat.title}». Читать из него объявления?",
+            reply_markup=InlineKeyboardMarkup([[B("✅ Да", callback_data=f"ch:allow:{cm.chat.id}"),
+                                                B("Нет", callback_data=f"ch:deny:{cm.chat.id}")]]),
+        )
+
+    async def on_channel_confirm(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        q = update.callback_query
+        await q.answer()
+        if not self.ok(update):
+            return
+        _, action, cid = q.data.split(":")
+        s = self.settings.get()
+        chans = [c for c in s["sources"]["channels"] if c != int(cid)]
+        if action == "allow":
+            chans.append(int(cid))
+        s["sources"]["channels"] = chans
+        self.settings.save(s)
+        await q.edit_message_text("✅ Читаю этот канал: каждое новое объявление разберу сам." if action == "allow"
+                                  else "Ок, этот канал не читаю.")
+
+    async def on_channel_post(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        msg = update.channel_post or update.edited_channel_post
+        if msg is None or msg.chat.id not in self.settings.get()["sources"]["channels"]:
+            return
+        items = self.message_listings(msg)
+        if items and self.db.kv_get("paused") != "1":
+            try:
+                await self.pipeline.ingest(items)
+            except Exception:
+                log.exception("channel ingest")
+
+    async def _source_blocked(self, name: str) -> None:
+        self.settings.update(f"sources.{name}.enabled", False)
+        await self.alert(
+            f"⛔ {name.upper()} блокирует прямые запросы бота (403), обходить защиту я не буду, поэтому опрос "
+            f"{name.upper()} выключил. Объявления присылай пересылкой от @thewarsawrentbot или через канал (/help)."
+        )
+
     async def _on_tg_listings(self, items: list) -> None:
         if self.db.kv_get("paused") == "1":
             return
@@ -283,6 +399,10 @@ class FlatBot:
         a.add_handler(CallbackQueryHandler(self.on_backfill_button, pattern=r"^bf:"))
         a.add_handler(CallbackQueryHandler(self.on_links_auto, pattern=r"^lk:"))
         a.add_handler(CallbackQueryHandler(self.on_update_button, pattern=r"^up:"))
+        a.add_handler(CallbackQueryHandler(self.on_channel_confirm, pattern=r"^ch:"))
+        a.add_handler(ChatMemberHandler(self.on_my_member, ChatMemberHandler.MY_CHAT_MEMBER))
+        a.add_handler(MessageHandler(filters.UpdateType.CHANNEL_POSTS, self.on_channel_post))
+        a.add_handler(MessageHandler(filters.FORWARDED & ~filters.COMMAND, self.on_forward))
         a.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.on_text))
 
     def ok(self, update: Update) -> bool:
@@ -441,7 +561,8 @@ class FlatBot:
         ]
         tg = s["sources"]["tgbot"]
         src_line = (f"\n📥 Источник: чат @{tg['chat']} — {'подключён' if getattr(self, 'watcher', None) else 'не подключён, запусти tg-login.bat'}"
-                    if tg.get("enabled") else "")
+                    if tg.get("enabled") else
+                    "\n📥 Объявления: пересылай мне сообщения от @thewarsawrentbot (можно пачкой) или подключи канал — см. /help")
         lines = [f"{'✅' if done else '⬜️'} {name} — {cmd}" for name, done, cmd in steps]
         await update.message.reply_text(
             "Привет! Я ищу квартиры, оцениваю и пишу владельцам.\n\n<b>Настройка</b>\n" + "\n".join(lines) + src_line

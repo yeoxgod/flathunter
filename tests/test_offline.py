@@ -707,3 +707,48 @@ class TgBotSourceTests(unittest.IsolatedAsyncioTestCase):
             res = await p.backfill(hours=48)
             self.assertEqual((res.get("sent"), res.get("already")), (1, 1))
             self.assertEqual(got[-1][:2], ("4c1", False))   # из backfill без автоотправки
+
+
+class ForwardAndChannelTests(unittest.IsolatedAsyncioTestCase):
+    def test_message_listings_from_ptb_message(self):
+        from datetime import timezone as tz
+        from telegram import Chat, InlineKeyboardButton, InlineKeyboardMarkup, Message, MessageEntity
+        from telegram import MessageOriginUser, User
+        from flathunter.bot import FlatBot
+        text = "🏠 2 pokoje Mokotów\n4 100 zł, 44 m²\nZobacz ogłoszenie"
+        msg = Message(
+            message_id=1, date=datetime(2026, 10, 28, 1, 0, tzinfo=tz.utc), chat=Chat(1, "private"), text=text,
+            entities=[MessageEntity("text_link", text.index("Zobacz"), 6, url="https://www.olx.pl/d/oferta/x-CID3-IDf1.html?a=1")],
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Otodom", url="https://www.otodom.pl/pl/oferta/y-ID4f2")]]),
+            forward_origin=MessageOriginUser(date=datetime(2026, 10, 27, 20, 0, tzinfo=tz.utc), sender_user=User(5, "rent", True)),
+        )
+        items = FlatBot.message_listings(msg)
+        self.assertEqual([(i.source, i.ext_id) for i in items], [("olx", "f1"), ("otodom", "4f2")])
+        self.assertEqual((items[0].price, items[0].area, items[0].rooms, items[0].location), (4100, 44.0, 2, "Mokotów"))
+        self.assertTrue(items[0].posted.startswith("2026-10-2"))
+
+    async def test_blocked_source_callback(self):
+        class Blocked:
+            async def get(self, url):
+                raise FetchError("HTTP 403", blocked=True)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db = DB(f"{tmp}/t.db")
+            st = Settings(db)
+            st.update("sources.otodom.search_url", "https://www.otodom.pl/pl/wyniki/wynajem/x")
+            st.update("sources.olx.enabled", False)
+            alerts, blocked = [], []
+
+            async def alert(t):
+                alerts.append(t)
+
+            async def on_blocked(name):
+                blocked.append(name)
+                st.update(f"sources.{name}.enabled", False)
+
+            p = Pipeline(db, st.get, Blocked(), FakeAnalyzer(), None, alert)
+            p.on_source_blocked = on_blocked
+            for _ in range(3):
+                await p.cycle()
+            self.assertEqual((blocked, alerts), (["otodom"], []))
+            self.assertEqual((await p.cycle()).get("no_sources"), 1)  # больше не долбим сайт
