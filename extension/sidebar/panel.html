@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <title>FlatHunter</title>
+  <link rel="stylesheet" href="panel.css">
+</head>
+<body>
+  <nav class="tabs">
+    <button data-tab="items" class="active">Объявления <span id="count" class="pill"></span></button>
+    <button data-tab="search">Поиск</button>
+    <button data-tab="me">О себе</button>
+    <button data-tab="settings">Настройки</button>
+  </nav>
+  <div id="status" class="status"></div>
+
+  <section id="tab-items" class="tab active">
+    <div class="row">
+      <button id="analyzeTab" class="primary">Разобрать эту страницу</button>
+      <select id="itemFilter">
+        <option value="new">Новые</option>
+        <option value="contacted">Написал</option>
+        <option value="all">Все</option>
+      </select>
+    </div>
+    <p id="onboarding" class="hint"></p>
+    <div id="items"></div>
+  </section>
+
+  <section id="tab-search" class="tab">
+    <h3>Что ищу</h3>
+    <textarea id="critText" rows="3" placeholder="Например: 2-3 комнаты до 5500 со всеми оплатами, Мокотув или Воля, от 35 м², с мебелью, рядом метро, без агентств"></textarea>
+    <div class="row"><button id="critParse" class="primary">Разобрать текст</button></div>
+    <div class="grid">
+      <label>Бюджет до, zł<input id="c_maxPrice" type="number" min="0"></label>
+      <label>от, zł<input id="c_minPrice" type="number" min="0"></label>
+      <label>Метраж от, м²<input id="c_minArea" type="number" min="0"></label>
+      <label>до, м²<input id="c_maxArea" type="number" min="0"></label>
+      <label>Комнат (через запятую)<input id="c_rooms" placeholder="2, 3"></label>
+      <label>Районы<input id="c_districts" placeholder="Mokotów, Wola"></label>
+    </div>
+    <label>Стоп-слова<input id="c_excludeKeywords" placeholder="pokój, biuro nieruchomości"></label>
+    <label>Пожелания для оценки<textarea id="c_wishes" rows="2"></textarea></label>
+    <div class="row"><button id="critSave" class="primary">Сохранить критерии</button><span id="critMsg" class="msg"></span></div>
+
+    <h3>Слежу за поиском</h3>
+    <p class="hint">Откройте Otodom или OLX, выставьте фильтры и сортировку «Najnowsze», затем нажмите кнопку ниже.
+      Вкладка будет обновляться сама, о новых подходящих объявлениях придёт уведомление.</p>
+    <div class="row"><button id="monitorTab" class="primary">Следить за текущей вкладкой</button></div>
+    <ul id="monitorList" class="list"></ul>
+    <div class="row">
+      <label class="inline"><input id="m_enabled" type="checkbox"> мониторинг включён</label>
+      <label class="inline">каждые <input id="m_interval" type="number" min="3" max="120" class="small"> мин</label>
+    </div>
+  </section>
+
+  <section id="tab-me" class="tab">
+    <h3>О себе</h3>
+    <p class="hint">Это попадёт в сообщения владельцам. Ничего сверх написанного не добавляется.</p>
+    <textarea id="meText" rows="3" placeholder="Меня зовут Иван, работаю программистом по umowa o pracę, заезд с 1 декабря на год, нас двое, без животных. Email ivan@mail.com, телефон +48 600 000 000"></textarea>
+    <div class="row"><button id="meParse" class="primary">Разобрать текст</button></div>
+    <div class="grid">
+      <label>Имя<input id="p_name"></label>
+      <label>Заезд<input id="p_move_in"></label>
+      <label>Срок<input id="p_lease"></label>
+      <label>Жильцы<input id="p_occupants"></label>
+      <label>Животные<input id="p_pets"></label>
+      <label>Email (для Otodom)<input id="p_email"></label>
+      <label>Телефон (для Otodom)<input id="p_phone"></label>
+    </div>
+    <label>О себе (по-польски)<textarea id="p_about" rows="2"></textarea></label>
+    <label>Ещё<textarea id="p_extra" rows="2"></textarea></label>
+    <div class="row"><button id="meSave" class="primary">Сохранить</button><span id="meMsg" class="msg"></span></div>
+  </section>
+
+  <section id="tab-settings" class="tab">
+    <h3>ИИ</h3>
+    <label>Модель<select id="s_provider">
+      <option value="gemini">Gemini (бесплатный ключ Google AI Studio)</option>
+      <option value="claude">Claude (API-ключ, платно)</option>
+    </select></label>
+    <div id="geminiBox">
+      <label>Ключ Gemini <a href="https://aistudio.google.com/apikey" target="_blank">получить</a><input id="s_geminiKey" type="password" autocomplete="off"></label>
+      <label>Модель Gemini<input id="s_geminiModel"></label>
+      <p class="hint">На бесплатном уровне Google может использовать запросы для улучшения своих продуктов.</p>
+    </div>
+    <div id="claudeBox">
+      <label>Ключ Claude <a href="https://console.anthropic.com/settings/keys" target="_blank">получить</a><input id="s_claudeKey" type="password" autocomplete="off"></label>
+      <label>Модель Claude<input id="s_claudeModel"></label>
+    </div>
+    <div class="row"><button id="aiTest">Проверить</button><span id="aiMsg" class="msg"></span></div>
+
+    <h3>Отклик</h3>
+    <label class="radio"><input type="radio" name="sendMode" value="copy"> Копировать текст</label>
+    <label class="radio"><input type="radio" name="sendMode" value="insert"> Вставлять в чат/форму, отправляю сам</label>
+    <label class="radio"><input type="radio" name="sendMode" value="send"> Вставлять и отправлять</label>
+    <p class="hint">«Отправлять» жмёт кнопку за вас на OLX, Otodom и в WhatsApp Web. Сайты не любят автоматизацию: используйте умеренно.</p>
+
+    <h3>Прочее</h3>
+    <label>Показывать объявления от оценки<input id="s_minScore" type="number" min="0" max="10" class="small"></label>
+    <label class="inline"><input id="s_notify" type="checkbox"> уведомления Windows о новых объявлениях</label>
+    <div class="row"><button id="settingsSave" class="primary">Сохранить</button><span id="settingsMsg" class="msg"></span></div>
+    <div class="row"><button id="clearAll" class="danger">Очистить список объявлений</button></div>
+  </section>
+
+  <template id="cardTpl">
+    <article class="card">
+      <header>
+        <span class="score"></span>
+        <a class="title" target="_blank"></a>
+      </header>
+      <div class="facts"></div>
+      <div class="note"></div>
+      <p class="verdict"></p>
+      <ul class="flags"></ul>
+      <details><summary>Плюсы и минусы</summary><ul class="pros"></ul><ul class="cons"></ul></details>
+      <details class="qbox"><summary>Уточнить у владельца</summary><ul class="questions"></ul></details>
+      <textarea class="draft" rows="6"></textarea>
+      <div class="actions">
+        <button class="respond primary"></button>
+        <button class="wa">WhatsApp</button>
+        <button class="copy">Копировать</button>
+      </div>
+      <div class="actions small">
+        <button data-instr="short">Короче</button>
+        <button data-instr="formal">Формальнее</button>
+        <button data-instr="casual">Проще</button>
+        <button class="done">Написал</button>
+        <button class="hide">Скрыть</button>
+      </div>
+      <div class="result"></div>
+    </article>
+  </template>
+
+  <script src="panel.js"></script>
+</body>
+</html>

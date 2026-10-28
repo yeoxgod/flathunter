@@ -1,0 +1,76 @@
+{
+  "manifest_version": 2,
+  "name": "FlatHunter Warszawa",
+  "version": "1.0.1",
+  "description": "Разбор объявлений аренды на Otodom и OLX: оценка, вопросы владельцу, сообщение на польском, мониторинг новых объявлений.",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "flathunter@yeoxgod",
+      "strict_min_version": "140.0",
+      "data_collection_permissions": {
+        "required": [
+          "websiteContent",
+          "personallyIdentifyingInfo"
+        ]
+      }
+    }
+  },
+  "icons": {
+    "48": "icons/icon.svg",
+    "96": "icons/icon.svg"
+  },
+  "permissions": [
+    "storage",
+    "unlimitedStorage",
+    "alarms",
+    "notifications",
+    "tabs",
+    "clipboardWrite",
+    "*://*.otodom.pl/*",
+    "*://*.olx.pl/*",
+    "*://web.whatsapp.com/*",
+    "https://generativelanguage.googleapis.com/*",
+    "https://api.anthropic.com/*"
+  ],
+  "background": {
+    "scripts": [
+      "lib/parse.js",
+      "lib/filters.js",
+      "lib/ai.js",
+      "background.js"
+    ],
+    "persistent": true
+  },
+  "sidebar_action": {
+    "default_title": "FlatHunter",
+    "default_panel": "sidebar/panel.html",
+    "default_icon": "icons/icon.svg",
+    "open_at_install": true
+  },
+  "browser_action": {
+    "default_title": "FlatHunter: открыть панель",
+    "default_icon": "icons/icon.svg"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "*://*.otodom.pl/*",
+        "*://*.olx.pl/*"
+      ],
+      "js": [
+        "lib/parse.js",
+        "content/site.js"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "*://web.whatsapp.com/*"
+      ],
+      "js": [
+        "content/whatsapp.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
+}
