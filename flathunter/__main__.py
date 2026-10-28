@@ -91,8 +91,20 @@ def main() -> None:
         print("Готово. Перезапусти бота (закрой окно бота и открой start.bat).")
         return
     if args.cmd == "update":
-        from .updater import UpdateError, apply, available
+        from .updater import TOKEN_URL, UpdateError, apply, available, has_token, save_token
 
+        if not has_token():
+            print("Для обновлений нужен GitHub-токен (один раз). Сейчас откроется GitHub:")
+            print("  Token name: flat-hunter; Repository access: Only select repositories -> flat-hunter;")
+            print("  Permissions -> Contents: Read-only. Нажми Generate token и скопируй его.")
+            import webbrowser
+
+            webbrowser.open(TOKEN_URL)
+            tok = input("Вставь токен: ").strip()
+            if not tok:
+                print("Токен пустой, отмена.")
+                sys.exit(1)
+            save_token(tok)
         try:
             new = available()
             if not new:

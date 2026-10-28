@@ -19,8 +19,41 @@ NEEDS_PIP = ROOT / "data" / "needs_pip"
 SKIP_TOP = {"data", ".venv", ".git"}
 
 
+TOKEN_URL = "https://github.com/settings/personal-access-tokens/new"
+
+
 class UpdateError(Exception):
     pass
+
+
+def _token() -> str:
+    try:
+        return json.loads((ROOT / "data" / "secrets.json").read_text(encoding="utf-8")).get("github_token", "")
+    except Exception:
+        return ""
+
+
+def save_token(token: str) -> None:
+    p = ROOT / "data" / "secrets.json"
+    try:
+        sec = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        sec = {}
+    sec["github_token"] = token.strip()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(sec, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _headers() -> dict:
+    h = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
+    t = _token()
+    if t:
+        h["Authorization"] = f"Bearer {t}"
+    return h
+
+
+def has_token() -> bool:
+    return bool(_token())
 
 
 def installed() -> dict:
@@ -33,12 +66,17 @@ def installed() -> dict:
 def latest() -> dict:
     """{'sha', 'message', 'date'} последнего коммита в GitHub."""
     try:
-        r = httpx.get(f"https://api.github.com/repos/{REPO}/commits/{BRANCH}", timeout=20,
-                      headers={"Accept": "application/vnd.github+json"})
+        r = httpx.get(f"https://api.github.com/repos/{REPO}/commits/{BRANCH}", timeout=20, headers=_headers())
+    except Exception as e:
+        raise UpdateError(f"GitHub недоступен: {e}")
+    if r.status_code in (401, 403, 404):
+        raise UpdateError("нет доступа к репозиторию: нужен GitHub-токен (запусти update.bat, он спросит)"
+                          if not has_token() else f"GitHub отказал в доступе (HTTP {r.status_code}): проверь токен, запусти update.bat")
+    try:
         r.raise_for_status()
         d = r.json()
     except Exception as e:
-        raise UpdateError(f"GitHub недоступен: {e}")
+        raise UpdateError(f"GitHub: {e}")
     return {"sha": d["sha"], "message": d["commit"]["message"].split("\n")[0], "date": d["commit"]["committer"]["date"]}
 
 
@@ -55,7 +93,8 @@ def apply(target: dict | None = None) -> dict:
     """Скачивает и раскладывает файлы. Возвращает {'sha','message','changed':[...],'pip':bool}."""
     target = target or latest()
     try:
-        r = httpx.get(f"https://codeload.github.com/{REPO}/zip/{target['sha']}", timeout=120, follow_redirects=True)
+        r = httpx.get(f"https://api.github.com/repos/{REPO}/zipball/{target['sha']}", timeout=180,
+                      follow_redirects=True, headers=_headers())
         r.raise_for_status()
     except Exception as e:
         raise UpdateError(f"не скачалось: {e}")

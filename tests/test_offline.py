@@ -628,7 +628,7 @@ class LinksAndUpdaterTests(unittest.TestCase):
             (root / "flathunter/x.py").write_text("print(1)\n")
             with mock.patch.object(up, "ROOT", root), mock.patch.object(up, "STATE", root / "data/v.json"), \
                     mock.patch.object(up, "NEEDS_PIP", root / "data/needs_pip"), \
-                    mock.patch("httpx.get", return_value=mock.Mock(content=buf.getvalue(), raise_for_status=lambda: None)):
+                    mock.patch("httpx.get", return_value=mock.Mock(content=buf.getvalue(), status_code=200, raise_for_status=lambda: None)):
                 res = up.apply({"sha": "abc", "message": "fix", "date": ""})
                 self.assertEqual(sorted(res["changed"]), ["requirements.txt", "start.bat"])  # x.py не изменился
                 self.assertTrue(res["pip"])
